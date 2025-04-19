@@ -1,0 +1,75 @@
+#: import auto_rgba kvFile_function.auto_rgba
+
+<MyAppWiget>:
+
+    status_content : status_content
+
+    orientation: 'vertical' 
+    padding: [10, 20, 10, 10]  # Add padding [left, top, right, bottom]
+    spacing: 10  # Add space between widgets
+    canvas.before:
+        Color:
+            rgba: 1,1,1,1
+        Rectangle:
+            pos: self.pos
+            size: self.size
+    Label:
+        text: "Demo App - 6 imu connection test"
+        font_size: 48
+        color: auto_rgba(3, 61, 252)
+        size_hint_y: None
+        height: 100  # Fixed height for the label
+        text_size: self.size
+        halign: 'center'
+        valign: 'middle'
+    Label: 
+        text: "Status"
+        id: status_content
+        font_size: 48
+        color: auto_rgba(3, 11, 252)
+        text_size: self.width, None  # Giới hạn chiều rộng theo widget, chiều cao tự động
+        size_hint: 0.9, None  # Sử dụng 90% chiều rộng của app
+        height: self.texture_size[1]  # Tự động điều chỉnh chiều cao theo nội dung
+        halign: 'center'  # Căn giữa theo chiều ngang
+        valign: 'middle'  # Căn giữa theo chiều dọc
+        pos_hint: {'center_x': 0.5}  # Đặt ở giữa app
+        padding: [10, 10]  # Thêm padding trong Label
+
+    BoxLayout:  # Spacer to push buttons to bottom
+        size_hint_y: 1
+    BoxLayout:  # Horizontal container for the buttons
+        orientation: 'horizontal'
+        size_hint_y: None
+        height: 100
+        spacing: 20  # Space between buttons
+        
+        Button:  # Left button
+            text: "Check Bluetooth connection"
+            size_hint: 0.3, 1
+            font_size: 24
+            background_color: 0.2, 0.7, 0.9, 1
+            text_size: self.width, None
+            halign: 'center'
+            valign: 'middle'
+            padding: [10, 10]
+            on_press: root.CHECK_BLUETOOTH_CONNECTION_BUTTON()
+            
+        Button:  # Middle button
+            text: "Check Battery"
+            size_hint: 0.3, 1
+            font_size: 24
+            background_color: 0.2, 0.7, 0.9, 1
+            text_size: self.width, None
+            halign: 'center'
+            valign: 'middle'
+            padding: [10, 10]
+            
+        Button:  # Right button
+            text: "Check Connection Stability"
+            size_hint: 0.3, 1
+            font_size: 24
+            background_color: 0.2, 0.7, 0.9, 1
+            text_size: self.width, None
+            halign: 'center'
+            valign: 'middle'
+            padding: [10, 10]
