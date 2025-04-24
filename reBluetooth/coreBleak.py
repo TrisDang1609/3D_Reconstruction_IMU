@@ -3,6 +3,15 @@ from bleak import BleakScanner, BleakClient
 import struct
 import numpy as np
 from collections import deque
+import time
+
+IMU_SERVICE_UUID = "2412b5cbd460800c15c39ba9ac5a8ade"
+
+# LED Control Characteristic UUID
+LED_CONTROL_CHAR_UUID = "5b02651040-88c29746d8be6c736a087a"
+
+# IMU Notification Characteristic UUID
+IMU_NOTIFY_CHAR_UUID = "61a885a441c360d09a536d652a70d29c"
 
 #START
 #-------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -10,6 +19,20 @@ from collections import deque
 # Space for global variables
 characteristic_uuid = "61A885A4-41C3-60D0-9A53-6D652A70D29C"
 available_devices_address = {}
+
+# Known characteristic UUIDs for IMU devices - add your three specific UUIDs here
+IMU_CHARACTERISTIC_UUIDS = [
+    "61A885A4-41C3-60D0-9A53-6D652A70D29C",  # Primary UUID
+    "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",  # Replace with your second UUID
+    "YYYYYYYY-YYYY-YYYY-YYYY-YYYYYYYYYYYY",  # Replace with your third UUID
+]
+
+# Device-specific characteristics mapping (can be populated as devices are discovered)
+DEVICE_CHARACTERISTICS = {
+    # "IMU1": "61A885A4-41C3-60D0-9A53-6D652A70D29C",
+    # "IMU2": "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
+    # Add more as you learn which characteristic works best for each device
+}
 
 #-------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -146,7 +169,7 @@ class BLUETOOTH_DETECTOR:
 
 class BLUETOOTH_DATA_READER():
 
-    global characteristic_uuid
+    global characteristic_uuid, IMU_CHARACTERISTIC_UUIDS, DEVICE_CHARACTERISTICS
 
     def __init__(self, devices_dict=None):
         """
@@ -156,14 +179,17 @@ class BLUETOOTH_DATA_READER():
         self.devices_dict = devices_dict or available_devices_address
         self.loop = asyncio.get_event_loop()
         self.characteristic_uuid = characteristic_uuid  # Using global characteristic UUID 
+        self.connection_attempts = {}  # Track connection attempts per device
+        self.successful_characteristics = {}  # Track which characteristic worked for which device
 
     async def handle_notification(self, device_name, queue, sender, data):
         """Process incoming data from a device and put it in the device's queue"""
         if len(data) >= 28:
             try:
                 values = struct.unpack('<7f', data[:28])
-                # Format output with just the values (no labels)
-                output = f"[DATA] {device_name}: {values[0]:.6f} {values[1]:.6f} {values[2]:.6f} {values[3]:.6f} {values[4]:.6f} {values[5]:.6f} {values[6]:.6f}"
+                ts = time.time()
+                # Format output with timestamp + values
+                output = f"[DATA] {device_name} {ts:.6f}: " + " ".join(f"{v:.6f}" for v in values)
                 await queue.put(output)
             except struct.error:
                 pass
@@ -353,112 +379,175 @@ class BLUETOOTH_DATA_READER():
 
     async def smart_connect_device(self, device_name, device_address, queue, connected_devices):
         """
-        Connect to a device with improved retry logic and connection handling
+        Connect to a device with improved retry logic and connection handling using multiple UUIDs
         """
         retry_count = 0
-        max_retries = 8  # Tăng số lần thử
+        max_retries = 8
         connected = False
-        backoff_time = 1  # Thời gian chờ ban đầu (giây)
+        backoff_time = 1
         
-        print(f"[smart_connect_device]: Preparing to connect to {device_name} at {device_address}...")
+        # Track connection attempts for this device
+        if device_name not in self.connection_attempts:
+            self.connection_attempts[device_name] = 0
+        self.connection_attempts[device_name] += 1
+        attempt_num = self.connection_attempts[device_name]
+        
+        print(f"[smart_connect_device]: Preparing to connect to {device_name} at {device_address}... (Session attempt: {attempt_num})")
+        
+        # Determine which characteristics to try first based on past successes
+        characteristic_uuids = []
+        
+        # If we already know which characteristic works for this device, try it first
+        if device_name in DEVICE_CHARACTERISTICS:
+            characteristic_uuids.append(DEVICE_CHARACTERISTICS[device_name])
+            
+        # Then add the rest of the known characteristics
+        for uuid in IMU_CHARACTERISTIC_UUIDS:
+            if uuid not in characteristic_uuids:  # Avoid duplicates
+                characteristic_uuids.append(uuid)
+        
+        print(f"[smart_connect_device]: Will try these characteristics for {device_name}: {characteristic_uuids}")
         
         while retry_count < max_retries and not connected:
             try:
-                # Tăng timeout để có nhiều thời gian hơn cho các kết nối khó khăn
+                # Use exponential backoff for retry timing
+                retry_delay = backoff_time * (1.5 ** retry_count)
                 print(f"[smart_connect_device]: Connecting to {device_name} (attempt {retry_count+1}/{max_retries})...")
-                async with BleakClient(device_address, timeout=20.0) as client:
-                    if not client.is_connected:
-                        print(f"[smart_connect_device]: Failed to connect to {device_name}. Retrying...")
-                        retry_count += 1
-                        # Sử dụng backoff time tăng dần để tránh xung đột
-                        await asyncio.sleep(backoff_time)
-                        backoff_time = min(backoff_time * 1.5, 5)  # Tăng thời gian chờ, tối đa 5 giây
-                        continue
-                    
-                    connected = True
-                    print(f"[smart_connect_device]: Connected to {device_name} [{device_address}]")
-                    
-                    # Update the connected status to True for this device
-                    connected_devices[device_name] = True
-                    
-                    # Check if the characteristic exists with improved error handling
-                    try:
-                        services = client.services
-                        characteristics = []
-                        for service in services:
-                            for char in service.characteristics:
-                                characteristics.append(char.uuid)
-                        
-                        if self.characteristic_uuid not in characteristics:
-                            print(f"[smart_connect_device]: Warning: Characteristic {self.characteristic_uuid} not found on {device_name}")
-                            print(f"[smart_connect_device]: Available characteristics: {', '.join(characteristics[:5])}...")
+                
+                # Connect with a timeout
+                client = BleakClient(device_address, timeout=20.0)
+                await client.connect()
+                try:
+                    await client.exchange_mtu(247)
+                    print(f"[smart_connect_device]: MTU to 247 for {device_name}")
+                except Exception:
+                    pass
+                
+                if not client.is_connected:
+                    print(f"[smart_connect_device]: Failed to connect to {device_name}. Retrying...")
+                    retry_count += 1
+                    await asyncio.sleep(retry_delay)
+                    continue
+                
+                connected = True
+                print(f"[smart_connect_device]: Connected to {device_name} [{device_address}]")
+                
+                # Update the connected status to True for this device
+                connected_devices[device_name] = True
+                
+                # Find all available characteristics
+                services = client.services
+                available_characteristics = []
+                for service in services:
+                    for char in service.characteristics:
+                        if "notify" in char.properties:
+                            available_characteristics.append(char.uuid)
+                
+                # Try to use the preferred characteristics in order
+                used_characteristic = None
+                for char_uuid in characteristic_uuids:
+                    # Normalize UUID format (uppercase/lowercase)
+                    normalized_uuid = char_uuid.upper()
+                    if any(normalized_uuid.upper() == avail.upper() for avail in available_characteristics):
+                        try:
+                            print(f"[smart_connect_device]: Trying characteristic {char_uuid} for {device_name}")
                             
-                            # Tìm characteristic hỗ trợ notify
-                            characteristic_to_use = None
-                            for service in services:
-                                for char in service.characteristics:
-                                    if "notify" in char.properties:
-                                        print(f"[smart_connect_device]: Using alternative characteristic: {char.uuid}")
-                                        characteristic_to_use = char.uuid
-                                        break
-                                if characteristic_to_use:
-                                    break
-                            if not characteristic_to_use:
-                                print(f"[smart_connect_device]: No notifiable characteristic found on {device_name}. Disconnecting.")
-                                return
-                        else:
-                            characteristic_to_use = self.characteristic_uuid
+                            # Create notification handler for this device
+                            device_notification_handler = lambda s, d: self.loop.create_task(
+                                self.handle_notification(device_name, queue, s, d)
+                            )
                             
-                        # Tạo notification handler cho thiết bị này với cơ chế buffer để giảm tải hệ thống
-                        device_notification_handler = lambda s, d: self.loop.create_task(
-                            self.handle_notification(device_name, queue, s, d)
-                        )
-                        
-                        await client.start_notify(characteristic_to_use, device_notification_handler)
-                        print(f"[smart_connect_device]: Started notifications for {device_name}")
-                        
-                    except Exception as e:
-                        print(f"[smart_connect_device]: Error handling services for {device_name}: {str(e)}")
-                        if connected:
-                            connected = False
-                            connected_devices[device_name] = False
-                        raise e
-                        
-                    # Reset retry count after successful connection
-                    retry_count = 0
+                            await client.start_notify(char_uuid, device_notification_handler)
+                            print(f"[smart_connect_device]: Successfully started notifications for {device_name} using {char_uuid}")
+                            used_characteristic = char_uuid
+                            
+                            # Remember which characteristic worked for this device
+                            DEVICE_CHARACTERISTICS[device_name] = char_uuid
+                            self.successful_characteristics[device_name] = char_uuid
+                            
+                            break
+                        except Exception as e:
+                            print(f"[smart_connect_device]: Error using characteristic {char_uuid} for {device_name}: {str(e)}")
+                            continue
+                
+                # If no preferred characteristic worked, try any available notify characteristic
+                if not used_characteristic and available_characteristics:
+                    for avail_char in available_characteristics:
+                        try:
+                            print(f"[smart_connect_device]: Trying fallback characteristic {avail_char} for {device_name}")
+                            
+                            device_notification_handler = lambda s, d: self.loop.create_task(
+                                self.handle_notification(device_name, queue, s, d)
+                            )
+                            
+                            await client.start_notify(avail_char, device_notification_handler)
+                            print(f"[smart_connect_device]: Successfully started notifications using fallback {avail_char}")
+                            used_characteristic = avail_char
+                            
+                            # Remember this characteristic for future use
+                            DEVICE_CHARACTERISTICS[device_name] = avail_char
+                            self.successful_characteristics[device_name] = avail_char
+                            
+                            break
+                        except Exception as e:
+                            print(f"[smart_connect_device]: Error using fallback characteristic {avail_char}: {str(e)}")
+                            continue
+                
+                if not used_characteristic:
+                    print(f"[smart_connect_device]: Could not find any usable characteristic for {device_name}")
+                    if client.is_connected:
+                        await client.disconnect()
+                    connected = False
+                    connected_devices[device_name] = False
+                    retry_count += 1
+                    await asyncio.sleep(retry_delay)
+                    continue
+                
+                # Reset retry count after successful connection
+                retry_count = 0
+                
+                # Keep connection alive with improved heartbeat
+                keep_alive_count = 0
+                while client.is_connected:
+                    await asyncio.sleep(0.5)
+                    keep_alive_count += 1
+                    if keep_alive_count % 20 == 0:  # Every 10 seconds
+                        # Optional: Add a connection check here if needed
+                        pass
                     
-                    # Keep connection alive with improved heartbeat
-                    while True:
-                        await asyncio.sleep(0.5)
-                        # Thêm cơ chế kiểm tra trạng thái kết nối nếu cần
-                        
             except Exception as e:
                 print(f"[smart_connect_device]: Error with {device_name}: {str(e)}")
                 retry_count += 1
                 if retry_count < max_retries:
                     print(f"[smart_connect_device]: Retrying connection to {device_name} ({retry_count}/{max_retries})...")
-                    # Sử dụng backoff time tăng dần để tránh xung đột
-                    await asyncio.sleep(backoff_time)
-                    backoff_time = min(backoff_time * 1.5, 5)  # Tăng thời gian chờ, tối đa 5 giây
+                    await asyncio.sleep(retry_delay)
                 else:
                     print(f"[smart_connect_device]: Max retries reached for {device_name}. Giving up.")
                     break
             finally:
-                if connected:
-                    connected = False
-                    # Update the connected status to False when disconnected
-                    connected_devices[device_name] = False
-                    print(f"[smart_connect_device]: Disconnected from {device_name}")
+                # Ensure we disconnect cleanly if the connection was established
+                if connected and client and client.is_connected:
+                    try:
+                        await client.disconnect()
+                    except Exception as e:
+                        print(f"[smart_connect_device]: Error disconnecting from {device_name}: {str(e)}")
+                
+                connected = False
+                # Update the connected status to False when disconnected
+                connected_devices[device_name] = False
+                print(f"[smart_connect_device]: Disconnected from {device_name}")
         
         print(f"[smart_connect_device]: Device connection task for {device_name} ended.")
 
     async def batch_connect_devices(self, devices_batch, device_queues, connected_devices):
-        """Connect to a batch of devices in parallel"""
+        """Connect to a batch of devices in parallel with staggered start times"""
         tasks = []
-        for name, address, queue in devices_batch:
+        for i, (name, address, queue) in enumerate(devices_batch):
+            # giảm xuống 200ms để nhanh hơn
+            await asyncio.sleep(0.2)
             tasks.append(self.smart_connect_device(name, address, queue, connected_devices))
         
-        # Chạy tất cả tác vụ kết nối trong lô này đồng thời
+        # Run all tasks in this batch concurrently
         await asyncio.gather(*tasks)
 
     async def READ_DATA(self, devices_dict=None):
@@ -476,6 +565,12 @@ class BLUETOOTH_DATA_READER():
         print(f"[READ_DATA]: Starting data collection from {len(self.devices_dict)} devices:")
         for name, address in self.devices_dict.items():
             print(f"[READ_DATA]: - {name}: {address}")
+            
+        # Print any known device-specific characteristics
+        if DEVICE_CHARACTERISTICS:
+            print("[READ_DATA]: Using these device-specific characteristics:")
+            for name, uuid in DEVICE_CHARACTERISTICS.items():
+                print(f"[READ_DATA]: - {name}: {uuid}")
         
         # Create queues, collect names and addresses
         device_queues = []
@@ -487,9 +582,8 @@ class BLUETOOTH_DATA_READER():
         # Shared dictionary to track connection status
         connected_devices = {name: False for name in device_names}
         
-        # Create batches of devices for parallel connection
-        # Group into batches of 3 devices each for optimal BLE management
-        batch_size = 3  # Kết nối đồng thời 3 thiết bị một lúc
+        # Tùy chỉnh batch_size dựa trên tổng thiết bị (tối đa 3)
+        batch_size = min(3, len(self.devices_dict))
         device_batches = []
         current_batch = []
         
@@ -502,14 +596,42 @@ class BLUETOOTH_DATA_READER():
         # Create the data processing task
         processing_task = self.process_data(device_queues, device_names, connected_devices)
         
-        # Connection task for managing the batches
+        # Connection task for managing the batches with better spacing
         async def connection_manager():
             print(f"[READ_DATA]: Starting connection of {len(self.devices_dict)} devices in {len(device_batches)} batches")
+            
+            # First attempt - connect all batches
             for i, batch in enumerate(device_batches):
                 print(f"[READ_DATA]: Connecting batch {i+1}/{len(device_batches)} with {len(batch)} devices")
                 await self.batch_connect_devices(batch, device_queues, connected_devices)
-                # Wait briefly between batches to avoid Bluetooth stack overload
-                await asyncio.sleep(1)
+                # Giảm slightly thời gian chờ nếu muốn nhanh hơn
+                await asyncio.sleep(1.5)
+            
+            # Continuous reconnection for dropped devices
+            while True:
+                # Wait before checking for disconnected devices
+                await asyncio.sleep(5)
+                
+                # Check for any disconnected devices
+                disconnected_devices = [(n, self.devices_dict[n]) for n, s in connected_devices.items() if not s]
+                
+                if disconnected_devices:
+                    print(f"[READ_DATA]: Reconnecting {len(disconnected_devices)} disconnected devices")
+                    
+                    # Create new batches for reconnection
+                    reconnect_batches = []
+                    current_batch = []
+                    for i, (name, address) in enumerate(disconnected_devices):
+                        current_batch.append((name, address, device_queues[device_names.index(name)]))
+                        if len(current_batch) == batch_size or i == len(disconnected_devices) - 1:
+                            reconnect_batches.append(current_batch)
+                            current_batch = []
+                    
+                    # Reconnect each batch
+                    for i, batch in enumerate(reconnect_batches):
+                        print(f"[READ_DATA]: Reconnecting batch {i+1}/{len(reconnect_batches)}")
+                        await self.batch_connect_devices(batch, device_queues, connected_devices)
+                        await asyncio.sleep(1.5)  # Wait giữa batches nhẹ nhàng hơn
         
         # Run all tasks concurrently
         try:

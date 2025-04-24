@@ -2,6 +2,16 @@ name1 = "IMU1"
 name2 = "IMU2"
 # These are the correct addresses for the IMU devices
 characteristic_uuid = "61A885A4-41C3-60D0-9A53-6D652A70D29C"  # <-- set your notify UUID here
+
+# Service UUID
+IMU_SERVICE_UUID = "2412b5cbd460800c15c39ba9ac5a8ade"
+
+# LED Control Characteristic UUID
+LED_CONTROL_CHAR_UUID = "5b02651040-88c29746d8be6c736a087a"
+
+# IMU Notification Characteristic UUID
+IMU_NOTIFY_CHAR_UUID = "61a885a441c360d09a536d652a70d29c"
+
 address1 = '00:BE:44:C0:6B:3D'  # IMU1 address
 address2 = '58:3B:C2:56:8E:07'  # IMU2 address
 
